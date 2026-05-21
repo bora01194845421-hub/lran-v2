@@ -8,9 +8,12 @@
 import json
 import os
 import subprocess
+import html
+import re
 from datetime import date, datetime
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 from config import DATA_DIR, ANALYZED_DIR, PARADIGM_DIR, POLICY_DIR, DOMESTIC_DIR
@@ -550,6 +553,103 @@ a.yt-title:hover { color: #1C2B40; text-decoration: underline; }
 .ni-high   { background: #FEF2F2; color: #B91C1C; }
 .ni-mid    { background: #FFFBEB; color: #92400E; }
 .ni-watch  { background: #EFF6FF; color: #1E40AF; }
+/* ── 시민 목소리 섹션 ── */
+.cvoice-wrap { padding-top: 2px; }
+.cvoice-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.cvoice-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 14px;
+  border: 1px solid #D1D5DB;
+  border-radius: 18px;
+  background: #FFFFFF;
+  color: #6B7280;
+  font-size: 0.77rem;
+  font-weight: 700;
+  line-height: 1;
+}
+.cvoice-tab.active {
+  background: #1C2B40;
+  color: #FFFFFF;
+  border-color: #1C2B40;
+}
+.cvoice-tab .cnt {
+  font-family: Inter, monospace;
+  font-size: 0.66rem;
+  opacity: 0.82;
+}
+.cvoice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cvoice-item {
+  border-left: 3px solid #E5E7EB;
+  padding: 10px 12px 10px 14px;
+  background: #FFFFFF;
+  border-radius: 0 6px 6px 0;
+}
+.cvoice-item:hover {
+  border-left-color: #B91C1C;
+  background: #FAFAFA;
+}
+.cvoice-quote {
+  font-size: 0.8rem;
+  color: #111827;
+  line-height: 1.65;
+  font-weight: 500;
+}
+.cvoice-quote b {
+  font-weight: 800;
+  color: #111827;
+  background: linear-gradient(transparent 60%, #FEF3C7 60%);
+}
+.cvoice-meta {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.cvoice-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 0.63rem;
+  font-weight: 700;
+}
+.cv-red   { background:#FEF2F2; color:#B91C1C; border:1px solid #FECACA; }
+.cv-navy  { background:#EFF6FF; color:#1D4ED8; border:1px solid #BFDBFE; }
+.cv-amber { background:#FFF7ED; color:#B45309; border:1px solid #FED7AA; }
+.cv-green { background:#F0FDF4; color:#15803D; border:1px solid #BBF7D0; }
+.cv-gray  { background:#F9FAFB; color:#6B7280; border:1px solid #E5E7EB; }
+.cvoice-src, .cvoice-like {
+  font-size: 0.67rem;
+  color: #6B7280;
+  font-family: Inter, monospace;
+}
+.cvoice-link {
+  font-size: 0.67rem;
+  color: #1D4ED8;
+  font-weight: 700;
+  text-decoration: none;
+}
+.cvoice-link:hover { text-decoration: underline; }
+.cvoice-foot {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed #D1D5DB;
+  font-size: 0.64rem;
+  color: #6B7280;
+  line-height: 1.7;
+}
+.cvoice-foot b { color: #374151; }
 
 /* ── 빈 상태 ── */
 .empty-dark {
@@ -661,6 +761,225 @@ def ds(d): return d.strftime("%Y%m%d")
 def fmt(d): return d.strftime("%Y-%m-%d")
 def fmt_ko(d): return d.strftime("%Y년 %m월 %d일")
 
+def load_citizen_voice_xlsx(date_str):
+    candidates = [
+        DATA_DIR / "citizen_voice" / f"citizen_voice_{date_str}.xlsx",
+        DATA_DIR / "citizen_voice" / f"citizen_voice_{date_str.replace('-', '')}.xlsx",
+        DATA_DIR / f"citizen_voice_{date_str}.xlsx",
+        DATA_DIR / f"citizen_voice_{date_str.replace('-', '')}.xlsx",
+    ]
+    target = next((p for p in candidates if p.exists()), None)
+    if not target:
+        return None
+
+    try:
+        df = pd.read_excel(target, sheet_name="data")
+        df.columns = [str(c).strip() for c in df.columns]
+
+        required = ["channel", "source_title", "comment", "like_count", "posted_date", "tag"]
+        for col in required:
+            if col not in df.columns:
+                return None
+
+        if "source_url" not in df.columns:
+            df["source_url"] = ""
+        if "bold_phrase" not in df.columns:
+            df["bold_phrase"] = ""
+
+        df = df[required + ["source_url", "bold_phrase"]].copy()
+        df = df.dropna(subset=required)
+
+        df["channel"] = df["channel"].astype(str).str.strip().str.lower()
+        df["source_title"] = df["source_title"].astype(str).str.strip()
+        df["comment"] = df["comment"].astype(str).str.strip()
+        df["tag"] = df["tag"].astype(str).str.strip()
+        df["source_url"] = df["source_url"].fillna("").astype(str).str.strip()
+        df["bold_phrase"] = df["bold_phrase"].fillna("").astype(str).str.strip()
+        df["like_count"] = pd.to_numeric(df["like_count"], errors="coerce").fillna(0).astype(int)
+        df["posted_date"] = pd.to_datetime(df["posted_date"], errors="coerce")
+
+        df = df.dropna(subset=["posted_date"])
+        df = df[df["channel"].isin(["naver", "youtube", "local", "daangn"])].copy()
+        if df.empty:
+            return None
+
+        df = df.sort_values(["like_count", "posted_date"], ascending=[False, False]).reset_index(drop=True)
+        return df
+    except Exception:
+        return None
+
+
+def get_citizen_voice_items(date_str):
+    df = load_citizen_voice_xlsx(date_str)
+    if df is not None and not df.empty:
+        return df.to_dict("records")
+
+    return [
+        {
+            "channel": "naver",
+            "source_title": "수원 휘발유 2천원 돌파",
+            "comment": "수원역 근처 휘발유 2,150원 찍었네요. 출퇴근만 해도 한 달에 7만원 더 나가는 셈",
+            "like_count": 312,
+            "posted_date": pd.to_datetime("2026-05-10"),
+            "tag": "유류비",
+            "source_url": "",
+            "bold_phrase": "",
+        },
+        {
+            "channel": "naver",
+            "source_title": "중동전쟁 민생 직격",
+            "comment": "경기도 안에서도 수원만 별다른 대책이 없네요. 성남은 상품권 할인이라도 해주던데",
+            "like_count": 187,
+            "posted_date": pd.to_datetime("2026-05-09"),
+            "tag": "정책",
+            "source_url": "",
+            "bold_phrase": "수원만 별다른 대책이 없네요",
+        },
+        {
+            "channel": "youtube",
+            "source_title": "고유가에 자영업자 곡소리",
+            "comment": "배달비 4,500원이면 차라리 직접 가서 사 먹는 게 싸요. 동네 분식집 사장님도 손님 줄었다고 한숨",
+            "like_count": 156,
+            "posted_date": pd.to_datetime("2026-05-08"),
+            "tag": "소상공인",
+            "source_url": "",
+            "bold_phrase": "",
+        },
+        {
+            "channel": "local",
+            "source_title": "6월 도시가스 인상 예고",
+            "comment": "도시가스도 6월에 또 오른다는데 우리 동네에서라도 뭐 좀 해줬으면 좋겠어요",
+            "like_count": 94,
+            "posted_date": pd.to_datetime("2026-05-07"),
+            "tag": "에너지",
+            "source_url": "",
+            "bold_phrase": "",
+        },
+        {
+            "channel": "daangn",
+            "source_title": "수원 생활물가 체감",
+            "comment": "당근 동네생활에서도 요즘 기름값이랑 배달비 부담 얘기가 자주 보이네요",
+            "like_count": 82,
+            "posted_date": pd.to_datetime("2026-05-10"),
+            "tag": "유류비",
+            "source_url": "",
+            "bold_phrase": "기름값이랑 배달비 부담",
+        },
+    ]
+
+
+def cv_tag_class(tag):
+    return {
+        "유류비": "cv-red",
+        "정책": "cv-navy",
+        "소상공인": "cv-amber",
+        "에너지": "cv-green",
+    }.get(str(tag).strip(), "cv-gray")
+
+
+def cv_channel_label(ch):
+    return {
+        "naver": "네이버 뉴스",
+        "youtube": "유튜브",
+        "local": "지역 언론",
+        "daangn": "당근",
+    }.get(ch, ch)
+
+
+def cv_mmdd(v):
+    try:
+        dt = pd.to_datetime(v)
+        return f"{dt.month}.{dt.day}"
+    except Exception:
+        return "-"
+
+
+def cv_highlight(text, phrase):
+    text = html.escape(str(text or ""))
+    phrase = str(phrase or "").strip()
+    if not phrase:
+        return text
+    try:
+        return re.sub(
+            re.escape(html.escape(phrase)),
+            f"<b>{html.escape(phrase)}</b>",
+            text,
+            count=1,
+            flags=re.IGNORECASE
+        )
+    except Exception:
+        return text
+
+
+def build_citizen_voice_html(items, selected_channel="all", limit=4):
+    items = items or []
+
+    counts = {
+        "all": len(items),
+        "naver": sum(1 for x in items if x.get("channel") == "naver"),
+        "youtube": sum(1 for x in items if x.get("channel") == "youtube"),
+        "local": sum(1 for x in items if x.get("channel") == "local"),
+        "daangn": sum(1 for x in items if x.get("channel") == "daangn"),
+    }
+
+    filtered = items[:limit] if selected_channel == "all" else [
+        x for x in items if x.get("channel") == selected_channel
+    ][:limit]
+
+    tabs = []
+    for key, label in [
+        ("all", "전체"),
+        ("naver", "네이버 뉴스"),
+        ("youtube", "유튜브"),
+        ("local", "지역 언론"),
+        ("daangn", "당근"),
+    ]:
+        active = " active" if key == selected_channel else ""
+        tabs.append(
+            f"<span class='cvoice-tab{active}'>{label}<span class='cnt'>{counts.get(key, 0)}</span></span>"
+        )
+
+    rows = []
+    for row in filtered:
+        tag = str(row.get("tag", "")).strip()
+        source_title = html.escape(str(row.get("source_title", "")))
+        comment_html = cv_highlight(row.get("comment", ""), row.get("bold_phrase", ""))
+        source_url = str(row.get("source_url", "")).strip()
+        link_html = (
+            f"<a class='cvoice-link' href='{html.escape(source_url)}' target='_blank' rel='noopener noreferrer'>원문</a>"
+            if source_url else ""
+        )
+
+        row_html = (
+            f"<div class='cvoice-item'>"
+            f"<div class='cvoice-quote'>\"{comment_html}\"</div>"
+            f"<div class='cvoice-meta'>"
+            f"<span class='cvoice-tag {cv_tag_class(tag)}'>{html.escape(tag)}</span>"
+            f"<span class='cvoice-src'>{cv_channel_label(row.get('channel'))} | &quot;{source_title}&quot; | {cv_mmdd(row.get('posted_date'))}</span>"
+            f"<span class='cvoice-like'>🔥 {int(row.get('like_count', 0)):,}</span>"
+            f"{link_html}"
+            f"</div></div>"
+        )
+        rows.append(row_html)
+
+    if not rows:
+        rows.append("<div class='empty-dark'>표시할 시민 목소리 데이터가 없습니다.</div>")
+
+    foot = (
+        "<div class='cvoice-foot'>"
+        "<div><b>수집</b> 수원 관련 민생 키워드 매칭 기사·영상·공개 채널 게시물 중 반응 상위 선별</div>"
+        "<div><b>채널</b> 네이버 뉴스 · 유튜브 · 지역 언론 · 당근</div>"
+        "<div><b>기준</b> 공감/좋아요 상위 · 직전 7일 중심</div>"
+        "</div>"
+    )
+
+    return (
+        f"<div class='cvoice-wrap'>"
+        f"<div class='cvoice-tabs'>{''.join(tabs)}</div>"
+        f"<div class='cvoice-list'>{''.join(rows)}</div>"
+        f"{foot}"
+        f"</div>"
+    )
 
 # ─────────────────────────────────────────────
 # 날짜 목록 수집
@@ -704,6 +1023,34 @@ if st.session_state.dp_month not in _months_list:
     st.session_state.dp_month = _months_list[0]
 
 _sel_dates = sorted(_by_month[st.session_state.dp_month], reverse=True)
+
+# ─────────────────────────────────────────────
+# 모바일 버전 바로가기 버튼
+# ─────────────────────────────────────────────
+st.markdown("""
+<div style="
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+">
+  <a href="https://sri.pplx.app/" target="_blank" rel="noopener noreferrer" style="
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #1C2B40;
+    color: #FFFFFF;
+    text-decoration: none;
+    padding: 7px 16px;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+  ">
+    <span style="font-size:1rem;">📱</span> 모바일로 보기
+  </a>
+</div>
+""", unsafe_allow_html=True)
 
 st.markdown("""
 <style>
@@ -1487,57 +1834,47 @@ st.markdown(f"""
 
 
 # ═══════════════════════════════════════════════════════════
-# ⑤ 한국 지자체 대응 현황
+# ⑤ 공개 채널 시민 목소리
 # ═══════════════════════════════════════════════════════════
-lga_data_raw = domestic.get("lga_responses", []) or minseang.get("lga_responses", [])
 
-DEFAULT_LGA = [
-    {"name":"경기도",   "type":"도",   "stage":"적극",     "actions":"에너지 취약계층 긴급 지원 예산 편성 검토, 도내 지자체 공동 대응 지침 준비, 중소기업 에너지비용 경감 조기 집행", "ref":"수원시 → 도비 매칭사업 연계 필요"},
-    {"name":"서울특별시","type":"광역","stage":"선제",     "actions":"에너지 위기 TF 가동, 취약계층 전기·가스요금 긴급 바우처 조기 집행, 서울형 에너지 상한제 연동 지원 검토",    "ref":"바우처 단가·지급 방식 벤치마킹 대상"},
-    {"name":"인천광역시","type":"광역","stage":"적극",     "actions":"LNG 수입 다변화 항만 대비 점검, 에너지 비상공급 계획 선제 수립",                                           "ref":"납품 단가 연동 지원 모델 참고"},
-    {"name":"전주시",   "type":"기초", "stage":"적극",     "actions":"K-패스 환급률 상향 조정 건의, 대중교통 에너지 비용 지자체 보조 확대",                                       "ref":"K-패스 수원 도입 시 직접 적용 가능"},
-    {"name":"부산광역시","type":"광역","stage":"모니터링", "actions":"해운·물류비 급등 모니터링, 수출기업 공급망 현황 파악 중",                                                 "ref":"삼성 공급망 연계 물류비 분석 공유 요청"},
-]
+citizen_voice_items = get_citizen_voice_items(date_str)
 
-lga_list = lga_data_raw if lga_data_raw else DEFAULT_LGA
-suwon_stage = urgency if urgency in ["선제","적극","검토","모니터링"] else "모니터링"
+cv_tab_map = {
+    "전체": "all",
+    "네이버 뉴스": "naver",
+    "유튜브": "youtube",
+    "지역 언론": "local",
+    "당근": "daangn",
+}
 
-lga_rows_html = ""
-for row in lga_list:
-    name  = row.get("name","")
-    ltype = row.get("type","기초")
-    stage = row.get("stage","모니터링")
-    acts  = row.get("actions","")
-    lga_rows_html += (
-        f'<tr class="lga-row">'
-        f'<td class="lga-name-cell">{name}<span class="lga-type-tag tt-{ltype}">{ltype}</span></td>'
-        f'<td class="lga-stage-cell"><span class="stage-badge stage-{stage}">{stage}</span></td>'
-        f'<td class="lga-action-cell">{acts}</td>'
-        f'</tr>'
-    )
+cv_selected_label = st.radio(
+    "공개 채널 시민 목소리 필터",
+    options=list(cv_tab_map.keys()),
+    horizontal=True,
+    index=0,
+    key=f"cvtab_{date_str}",
+    label_visibility="collapsed",
+)
 
-st.markdown(f"""
-<div class="section-card">
-  <div class="sec-header">
-    <span class="sec-title"><span class="sec-num">05</span> 지자체 대응</span>
-    <span class="sec-badge badge-green">Local Gov Response Matrix</span>
-  </div>
-  <table class="lga-table">
-    <thead>
-      <tr>
-        <th class="lga-th" style="min-width:120px">지자체</th>
-        <th class="lga-th" style="min-width:90px">대응 단계</th>
-        <th class="lga-th">주요 조치</th>
-      </tr>
-    </thead>
-    <tbody>{lga_rows_html}</tbody>
-  </table>
-  <div style="margin-top:10px;font-size:0.65rem;color:#2D4A65">
-    대응단계: <span style="color:#F87171;font-weight:700">선제</span> &gt; <span style="color:#FCD34D;font-weight:700">적극</span> &gt; <span style="color:#93C5FD;font-weight:700">검토</span> &gt; <span style="color:#64748B;font-weight:700">모니터링</span>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+cv_selected_channel = cv_tab_map[cv_selected_label]
+cv_html = build_citizen_voice_html(
+    citizen_voice_items,
+    selected_channel=cv_selected_channel,
+    limit=6 if cv_selected_channel == "all" else 4
+)
 
+st.markdown(
+    f"""
+    <div class="section-card">
+      <div class="sec-header">
+        <span class="sec-title"><span class="sec-num">05</span> 공개 채널 시민 목소리</span>
+        <span class="sec-badge badge-green">Citizen Voice Monitor</span>
+      </div>
+      {cv_html}
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # (⑥⑦ 민생경제·대응과제는 ③④ 위치로 이동됨)
 
